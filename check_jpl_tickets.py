@@ -71,7 +71,7 @@ def notify(message: str, title: str, priority: str = "default") -> None:
         )
     except requests.RequestException as e:
         print(f"Failed to send notification: {e}")
-
+    notify('This is a manual test', title='Test notification')
 
 def fetch_page() -> requests.Response:
     headers = {
@@ -122,7 +122,7 @@ def main() -> int:
         return 0
 
     state["fail_count"] = 0
-notify('This is a manual test', title='Test notification')
+
     if resp.status_code == 403:
         print("Got HTTP 403 -- likely blocked by bot protection.")
         if last_status != "blocked":
