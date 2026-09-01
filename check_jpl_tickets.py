@@ -72,7 +72,6 @@ def notify(message: str, title: str, priority: str = "default") -> None:
     except requests.RequestException as e:
         print(f"Failed to send notification: {e}")
  
-notify('This is a manual test', title='Test notification')   
 
 def fetch_page() -> requests.Response:
     headers = {
