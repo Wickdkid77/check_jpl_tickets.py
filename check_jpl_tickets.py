@@ -7,7 +7,7 @@ State (whether tickets looked available on the last run) is persisted to
 state.json so we only notify on a *transition* from sold-out -> available,
 instead of spamming you every 5 minutes while tickets stay open.
 """
-notify('This is a manual test', title='Test notification')
+
 import json
 import os
 import sys
@@ -122,7 +122,7 @@ def main() -> int:
         return 0
 
     state["fail_count"] = 0
-
+notify('This is a manual test', title='Test notification')
     if resp.status_code == 403:
         print("Got HTTP 403 -- likely blocked by bot protection.")
         if last_status != "blocked":
