@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-Checks the Eventbrite listing for JPL's "Explore JPL" open house and sends a
-push notification (via ntfy.sh) if tickets appear to be available again.
+Checks JPL's "Explore JPL" open house on Eventbrite for available tickets and
+sends a push notification (via ntfy.sh) if tickets become available again.
+
+Instead of guessing from the public page's HTML/text (unreliable -- CTA
+buttons like "Reserve a spot" appear regardless of real availability), this
+calls the same JSON API the Eventbrite page itself uses to populate the
+ticket picker, and reads the `availability.hasAvailableTickets` field
+directly -- the same signal Eventbrite's own front-end relies on.
 
 State (whether tickets looked available on the last run) is persisted to
 state.json so we only notify on a *transition* from sold-out -> available,
@@ -16,28 +22,20 @@ from pathlib import Path
 import requests
 
 EVENT_URL = "https://www.eventbrite.com/e/explore-jpl-2026-tickets-1997060604026"
+EVENT_ID = "1997060604026"
+ORGANIZATION_ID = "168770254525"
+API_URL = (
+    f"https://www.eventbrite.com/e/api/{EVENT_ID}/ticket-information"
+    f"?organizationId={ORGANIZATION_ID}&isChild=false&isOnline=false"
+    f"&eventTimezone=America%2FLos_Angeles"
+)
+
 STATE_FILE = Path("state.json")
 
 # Set this via the NTFY_TOPIC environment variable (see workflow file).
 # Pick a hard-to-guess topic name -- anyone who knows it can read your
 # notifications, since ntfy topics aren't private by default.
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
-
-# Phrases that strongly suggest the event is still sold out.
-SOLD_OUT_PHRASES = [
-    "sold out",
-    "this event is sold out",
-    "tickets are no longer available",
-]
-
-# Phrases that suggest tickets can currently be selected/reserved.
-AVAILABLE_PHRASES = [
-    "select a date",
-    "select quantity",
-    "reserve tickets",
-    "get tickets",
-    "checkout",
-]
 
 
 def load_state() -> dict:
@@ -71,32 +69,35 @@ def notify(message: str, title: str, priority: str = "default") -> None:
         )
     except requests.RequestException as e:
         print(f"Failed to send notification: {e}")
- 
 
-def fetch_page() -> requests.Response:
+
+def fetch_ticket_info() -> requests.Response:
     headers = {
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": EVENT_URL,
         # A realistic browser UA reduces (but doesn't eliminate) the chance
-        # of being blocked by bot-protection.
+        # of being blocked by bot-protection (this endpoint sits behind an
+        # AWS WAF, per the captured request).
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "en-US,en;q=0.9",
     }
-    return requests.get(EVENT_URL, headers=headers, timeout=20)
+    return requests.get(API_URL, headers=headers, timeout=20)
 
 
-def classify(html: str) -> str:
-    lower = html.lower()
-    has_sold_out = any(p in lower for p in SOLD_OUT_PHRASES)
-    has_available = any(p in lower for p in AVAILABLE_PHRASES)
+def classify(data: dict) -> str:
+    availability = data.get("availability", {})
+    has_available = availability.get("hasAvailableTickets")
+    is_sold_out = data.get("isSoldOut")
 
-    if has_sold_out and not has_available:
-        return "sold_out"
-    if has_available and not has_sold_out:
+    if has_available is True:
         return "available"
-    # Ambiguous -- both or neither phrase set matched. Treat cautiously.
+    if is_sold_out is True or has_available is False:
+        return "sold_out"
+    # Field missing or unexpected shape -- don't guess.
     return "unclear"
 
 
@@ -105,11 +106,9 @@ def main() -> int:
     last_status = state.get("last_status", "unknown")
 
     try:
-        resp = fetch_page()
+        resp = fetch_ticket_info()
     except requests.RequestException as e:
         print(f"Request failed: {e}")
-        # Don't spam on transient network errors, but do surface repeated
-        # failures so you know the checker itself might be broken.
         fail_count = state.get("fail_count", 0) + 1
         state["fail_count"] = fail_count
         save_state(state)
@@ -124,7 +123,7 @@ def main() -> int:
     state["fail_count"] = 0
 
     if resp.status_code == 403:
-        print("Got HTTP 403 -- likely blocked by bot protection.")
+        print("Got HTTP 403 -- likely blocked by bot protection (WAF).")
         if last_status != "blocked":
             notify(
                 "Eventbrite is blocking the automated checker (HTTP 403). "
@@ -137,12 +136,24 @@ def main() -> int:
 
     if resp.status_code != 200:
         print(f"Unexpected status code: {resp.status_code}")
+        print(resp.text[:500])
         state["last_status"] = "unclear"
         save_state(state)
         return 0
 
-    status = classify(resp.text)
+    try:
+        data = resp.json()
+    except ValueError:
+        print("Response wasn't valid JSON -- API shape may have changed.")
+        state["last_status"] = "unclear"
+        save_state(state)
+        return 0
+
+    status = classify(data)
     print(f"Detected status: {status} (previous: {last_status})")
+    print(f"  isSoldOut={data.get('isSoldOut')}  "
+          f"hasAvailableTickets={data.get('availability', {}).get('hasAvailableTickets')}  "
+          f"hasAvailableHiddenTickets={data.get('availability', {}).get('hasAvailableHiddenTickets')}")
 
     if status == "available" and last_status != "available":
         notify(
